@@ -1,126 +1,101 @@
-const mineflayer = require('mineflayer');
-const pathfinder = require('mineflayer-pathfinder').pathfinder;
-const { Movements, goals } = require('mineflayer-pathfinder');
-const pvp = require('mineflayer-pvp').plugin;
-const autoeat = require('mineflayer-auto-eat').plugin;
-const tool = require('mineflayer-tool').plugin;
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const bedrock = require('bedrock-protocol');
+const brain = require('brain.js');
+const fs = require('fs');
+const axios = require('axios');
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const vec3 = require('vec3');
 
-// --- 1. CONFIGURATION ---
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const DATA_FILE = './brain_state.json';
+const API_URL = `https://panel.play.hosting/api/client/servers/${process.env.SERVER_ID}/power`;
 
-app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
+// --- 🧠 NEURAL NETWORK SETUP ---
+let net = new brain.NeuralNetwork();
+let isTrained = false;
 
-// Security: Only these accounts can control the bot
-const MASTER_ACCOUNTS = ['Blackhunt19020', '.Blackhunt19020'];
-
-let bot;
-let isConnected = false;
-let farmingActive = false;
-
-function createBot() {
-    bot = mineflayer.createBot({
-        host: process.env.SERVER_IP, 
-        username: 'Geminiai',
-        hideErrors: true
-    });
-
-    bot.loadPlugin(pathfinder);
-    bot.loadPlugin(pvp);
-    bot.loadPlugin(autoeat);
-    bot.loadPlugin(tool);
-
-    bot.on('spawn', () => {
-        isConnected = true;
-        const mcData = require('minecraft-data')(bot.version);
-        const movements = new Movements(bot, mcData);
-        movements.allowSprinting = true;
-        movements.allowParkour = true;
-        bot.pathfinder.setMovements(movements);
-        console.log(`✅ Geminiai active on ${process.env.SERVER_IP}`);
-    });
-
-    // --- 2. COMMAND LOGIC ---
-    bot.on('chat', async (username, message) => {
-        if (username === bot.username || !MASTER_ACCOUNTS.includes(username)) return;
-
-        // Command: Come to Master
-        if (message === 'come') {
-            const target = bot.players[username]?.entity;
-            if (target) {
-                bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1));
-            }
+function loadBrain() {
+    try {
+        if (fs.existsSync(DATA_FILE)) {
+            const raw = fs.readFileSync(DATA_FILE);
+            net.fromJSON(JSON.parse(raw));
+            isTrained = true;
+            console.log("🧠 Brain loaded from disk.");
         }
-
-        // Command: Start Farming
-        if (message === 'start farming') {
-            bot.chat("Understood, Master. Tending to the fields now.");
-            farmingActive = true;
-            runFarmLoop();
-        }
-
-        // Command: AI Chat
-        if (message.includes('Geminiai')) {
-            try {
-                const result = await aiModel.generateContent(`Your master ${username} says: ${message}. Respond as Geminiai, an intelligent player.`);
-                bot.chat(result.response.text());
-            } catch (e) { console.log("AI Error"); }
-        }
-    });
-
-    bot.on('end', () => {
-        isConnected = false;
-        setTimeout(createBot, 30000); // Auto-reconnect
-    });
+    } catch (e) { console.log("🆕 Starting with a fresh brain."); }
 }
 
-// --- 3. FARMING SYSTEM ---
-async function runFarmLoop() {
-    if (!farmingActive || !isConnected) return;
-
-    const block = bot.findBlock({
-        matching: (blk) => ['wheat', 'carrots', 'potatoes'].includes(blk.name) && blk.metadata === 7,
-        maxDistance: 32
-    });
-
-    if (block) {
-        try {
-            await bot.pathfinder.setGoal(new goals.GoalLookAtBlock(block.position, bot.world));
-            await bot.dig(block);
-            const seed = bot.inventory.items().find(i => i.name.includes('seed') || ['carrot', 'potato'].includes(i.name));
-            if (seed) {
-                await bot.equip(seed, 'hand');
-                await bot.placeBlock(bot.blockAt(block.position.offset(0, -1, 0)), new vec3(0, 1, 0));
-            }
-        } catch (e) { console.log("Farming action interrupted"); }
-    }
-    setTimeout(runFarmLoop, 10000); // Check every 10 seconds
+function saveBrain() {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(net.toJSON()));
 }
 
-// --- 4. DASHBOARD SYNC ---
-setInterval(() => {
-    if (isConnected && bot.entity) {
-        io.emit('statusUpdate', {
-            online: true,
-            coords: bot.entity.position,
-            health: bot.health,
-            food: bot.food,
-            inventory: bot.inventory.items().map(i => `${i.count}x ${i.name}`)
+loadBrain();
+
+// --- ⚡ PLAY.HOSTING API AUTO-REPAIR ---
+async function manageServer(action) {
+    console.log(`🔌 API Action: ${action.toUpperCase()} signal sent.`);
+    try {
+        await axios.post(API_URL, { signal: action }, {
+            headers: { 
+                'Authorization': `Bearer ${process.env.PANEL_API_KEY}`,
+                'Accept': 'application/json' 
+            }
         });
-    }
-}, 1000);
+    } catch (e) { console.error("❌ API Error:", e.message); }
+}
 
-io.on('connection', (socket) => {
-    socket.on('sendToMc', (msg) => { if(isConnected) bot.chat(msg); });
+// --- 🎮 THE AUTOMATIC BOT ENGINE ---
+function initBot() {
+    console.log("🤖 Attempting to join Minecraft...");
+
+    const client = bedrock.createClient({
+        host: process.env.SERVER_IP,
+        port: parseInt(process.env.SERVER_PORT),
+        username: 'Geminiai_Auto',
+        offline: true,
+        connectTimeout: 15000
+    });
+
+    // If we can't connect in 20s, the server is likely in "Limbo"
+    const limboTimer = setTimeout(() => {
+        console.log("🚨 Connection Hang Detected! Force Restarting Server...");
+        manageServer('restart');
+    }, 20000);
+
+    client.on('spawn', () => {
+        clearTimeout(limboTimer);
+        console.log("✅ Bot is inside the server.");
+        
+        // AI Learning Logic
+        client.on('set_health', (packet) => {
+            if (packet.health < 20) {
+                // Self-training on the fly
+                const data = [{ input: { hp: packet.health / 20 }, output: { safe: 0 } }];
+                net.train(data, { iterations: 100 }); 
+                saveBrain();
+                console.log("📝 AI updated its danger model.");
+            }
+        });
+    });
+
+    // 🔄 AUTO-RECONNECT LOGIC
+    client.on('close', () => {
+        console.log("🔌 Disconnected. Re-trying in 15 seconds...");
+        setTimeout(initBot, 15000);
+    });
+
+    client.on('error', (err) => {
+        console.log(`⚠️ Socket Error: ${err.message}`);
+        if (err.message.includes('ECONNREFUSED')) {
+            manageServer('start'); // Server is asleep, wake it up
+        }
+    });
+}
+
+// --- 📡 DASHBOARD (Health Check) ---
+app.get('/', (req, res) => {
+    res.send(`<h1>Geminiai AI</h1><p>Brain Active: ${isTrained}</p>`);
 });
 
-createBot();
-server.listen(process.env.PORT || 8080);
+app.listen(process.env.PORT || 3000, () => {
+    console.log("🚀 Automation System Online.");
+    initBot();
+});
