@@ -1,101 +1,74 @@
-const bedrock = require('bedrock-protocol');
-const brain = require('brain.js');
-const fs = require('fs');
-const axios = require('axios');
-const express = require('express');
+const mineflayer = require('mineflayer');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const http = require('http');
+const { Server } = require("socket.io");
 
-const app = express();
-const DATA_FILE = './brain_state.json';
-const API_URL = `https://panel.play.hosting/api/client/servers/${process.env.SERVER_ID}/power`;
+// --- 1. CONFIGURATION (Edit these) ---
+const CONFIG = {
+    mc_host: 'Hellofrinds.play.hosting', // e.g., 'my-server.aternos.me'
+    bot_name: 'Geminiai_Bot',
+    mc_version: '1.20.1',                   // Match your server
+    gemini_key: 'AIzaSyDhnXw3xrungnRzmvtnqik2oHYbfOW6ifk',
+    auth_type: 'offline'                     // 'offline' for cracked/crossplay
+};
 
-// --- 🧠 NEURAL NETWORK SETUP ---
-let net = new brain.NeuralNetwork();
-let isTrained = false;
+// --- 2. KEEP-ALIVE & DASHBOARD PORT ---
+const server = http.createServer((req, res) => {
+    res.write("Geminiai Bot is Online!");
+    res.end();
+});
+const io = new Server(server, { cors: { origin: "*" } });
+const PORT = process.env.PORT || 8080; // Uses port from host or 8080
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
-function loadBrain() {
-    try {
-        if (fs.existsSync(DATA_FILE)) {
-            const raw = fs.readFileSync(DATA_FILE);
-            net.fromJSON(JSON.parse(raw));
-            isTrained = true;
-            console.log("🧠 Brain loaded from disk.");
-        }
-    } catch (e) { console.log("🆕 Starting with a fresh brain."); }
-}
+// --- 3. GEMINI AI SETUP ---
+const genAI = new GoogleGenerativeAI(CONFIG.gemini_key);
+const aiModel = genAI.getGenerativeModel({ model: "gemini-pro" });
 
-function saveBrain() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(net.toJSON()));
-}
-
-loadBrain();
-
-// --- ⚡ PLAY.HOSTING API AUTO-REPAIR ---
-async function manageServer(action) {
-    console.log(`🔌 API Action: ${action.toUpperCase()} signal sent.`);
-    try {
-        await axios.post(API_URL, { signal: action }, {
-            headers: { 
-                'Authorization': `Bearer ${process.env.PANEL_API_KEY}`,
-                'Accept': 'application/json' 
-            }
-        });
-    } catch (e) { console.error("❌ API Error:", e.message); }
-}
-
-// --- 🎮 THE AUTOMATIC BOT ENGINE ---
-function initBot() {
-    console.log("🤖 Attempting to join Minecraft...");
-
-    const client = bedrock.createClient({
-        host: process.env.SERVER_IP,
-        port: parseInt(process.env.SERVER_PORT),
-        username: 'Geminiai_Auto',
-        offline: true,
-        connectTimeout: 15000
+// --- 4. MINEFLAYER BOT SETUP ---
+let bot;
+function startBot() {
+    bot = mineflayer.createBot({
+        host: CONFIG.mc_host,
+        username: CONFIG.bot_name,
+        version: CONFIG.mc_version,
+        auth: CONFIG.auth_type
     });
 
-    // If we can't connect in 20s, the server is likely in "Limbo"
-    const limboTimer = setTimeout(() => {
-        console.log("🚨 Connection Hang Detected! Force Restarting Server...");
-        manageServer('restart');
-    }, 20000);
-
-    client.on('spawn', () => {
-        clearTimeout(limboTimer);
-        console.log("✅ Bot is inside the server.");
-        
-        // AI Learning Logic
-        client.on('set_health', (packet) => {
-            if (packet.health < 20) {
-                // Self-training on the fly
-                const data = [{ input: { hp: packet.health / 20 }, output: { safe: 0 } }];
-                net.train(data, { iterations: 100 }); 
-                saveBrain();
-                console.log("📝 AI updated its danger model.");
-            }
-        });
+    bot.on('spawn', () => {
+        console.log("Bot spawned in Minecraft!");
+        // Anti-AFK: Jump every 2 minutes
+        setInterval(() => {
+            bot.setControlState('jump', true);
+            setTimeout(() => bot.setControlState('jump', false), 500);
+        }, 120000);
     });
 
-    // 🔄 AUTO-RECONNECT LOGIC
-    client.on('close', () => {
-        console.log("🔌 Disconnected. Re-trying in 15 seconds...");
-        setTimeout(initBot, 15000);
-    });
-
-    client.on('error', (err) => {
-        console.log(`⚠️ Socket Error: ${err.message}`);
-        if (err.message.includes('ECONNREFUSED')) {
-            manageServer('start'); // Server is asleep, wake it up
+    // AI Chat Logic
+    bot.on('chat', async (username, message) => {
+        if (username === bot.username) return;
+        if (message.toLowerCase().includes('geminiai')) {
+            try {
+                const prompt = `You are a Minecraft bot named Geminiai. Keep it short. ${username} says: ${message}`;
+                const result = await aiModel.generateContent(prompt);
+                bot.chat(result.response.text());
+            } catch (err) { console.error("AI Error:", err); }
         }
     });
+
+    // Auto-Reconnect
+    bot.on('end', (reason) => {
+        console.log(`Disconnected: ${reason}. Reconnecting in 30s...`);
+        setTimeout(startBot, 30000);
+    });
 }
 
-// --- 📡 DASHBOARD (Health Check) ---
-app.get('/', (req, res) => {
-    res.send(`<h1>Geminiai AI</h1><p>Brain Active: ${isTrained}</p>`);
+// --- 5. MOBILE APP LINK ---
+io.on('connection', (socket) => {
+    console.log("Mobile App Linked!");
+    bot.on('message', (jsonMsg) => {
+        socket.emit('chat', jsonMsg.toString()); // Sends MC chat to your phone
+    });
 });
 
-app.listen(process.env.PORT || 3000, () => {
-    console.log("🚀 Automation System Online.");
-    initBot();
-});
+startBot();
